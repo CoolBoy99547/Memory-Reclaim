@@ -1,0 +1,168 @@
+PS C:\Users\sovan\OneDrive\Documents\memory_reclaim_project> python main.py
+============================================================
+  MEMORY RECLAIM PREDICTION — FULL PIPELINE
+============================================================
+
+Preprocessing
+==================================================
+Loaded 60,000 rows × 25 columns
+Sessions : 1,086
+Sorted by session_id
+No missing values found
+Physical clip: corrected 358 values
+Encoded 8 categorical columns
+
+Output shape : (60000, 33)
+Saved → C:\Users\sovan\OneDrive\Documents\memory_reclaim_project\data\processed\memory_reclaim_cleaned.csv
+
+Feature Engineering
+==================================================
+Added 12 engineered features
+
+Computing IQR bounds on 868 train sessions...
+IQR bounds:
+  memory_used_kb                 [   1372803.6,    8896804.6]
+  memory_utilization_pct         [        12.3,        112.8]
+  swap_used_kb                   [  -2875413.8,    4792356.2]
+  swap_utilization_pct           [       -75.4,        125.6]
+  heap_utilization_pct           [        52.4,        102.5]
+  heap_free_ratio                [        -0.0,          0.5]
+  dha_total_kb                   [  -1525463.5,    3875662.5]
+  dha_cache_ratio                [         0.3,          1.0]
+  memory_pressure_score          [       -22.8,        117.9]
+
+IQR cap: corrected 6471 values
+Final shape: (60000, 45)
+Saved → C:\Users\sovan\OneDrive\Documents\memory_reclaim_project\data\features\memory_reclaim_final.csv
+Saved → C:\Users\sovan\OneDrive\Documents\memory_reclaim_project\data\features\iqr_bounds.json
+
+Training XGBoost Regressor
+==================================================
+Loaded 60,000 rows
+Target range: 30,000 → 936,803 KB
+Train: 868 sessions, 47,634 rows
+Test : 218 sessions, 12,366 rows
+No session overlap confirmed
+Features scaled (train-fitted scaler)
+
+Cross-validation (5 folds, TimeSeriesSplit)...
+  Fold 1: MAE=    42,255 KB  RMSE=    54,924 KB
+  Fold 2: MAE=    36,679 KB  RMSE=    46,087 KB
+  Fold 3: MAE=    35,005 KB  RMSE=    43,831 KB
+  Fold 4: MAE=    34,100 KB  RMSE=    42,841 KB
+  Fold 5: MAE=    38,547 KB  RMSE=    48,519 KB
+
+  Mean MAE  :     37,317 KB ± 2,898
+  Mean RMSE :     47,240 KB ± 4,312
+
+Training final model...
+Best iteration: 57
+Training complete
+Saved → C:\Users\sovan\OneDrive\Documents\memory_reclaim_project\models\xgb_regressor.pkl
+Saved → C:\Users\sovan\OneDrive\Documents\memory_reclaim_project\models\scaler.pkl
+
+Evaluation
+==================================================
+
+Global Metrics:
+MAE    :       42,429 KB  (41.4 MB)
+RMSE   :       52,563 KB  (51.3 MB)
+Median :       36,493 KB  (35.6 MB)
+Within ±50MB : 66.3%
+Within ±100MB : 95.2%
+Within ±150MB : 99.8%
+Within ±200MB : 100.0%
+
+MAE by game:
+  Group                         MAE (KB)    MAE (MB)    Rows
+  ----------------------------------------------------------
+  COC                             43,996        43.0     616
+  CODM                            49,018        47.9    1588
+  CandyCrush                      39,245        38.3    1018
+  EightBallPool                   41,186        40.2    1676
+  FreeFire                        47,157        46.1     986
+  HillClimbRacing                 38,913        38.0    1444
+  LudoKing                        39,383        38.5     858
+  SubwaySurfer                    40,551        39.6    1754
+  WCC3                            40,962        40.0    1220
+  eFootball                       44,091        43.1    1206
+
+MAE by device:
+  Group                         MAE (KB)    MAE (MB)    Rows
+  ----------------------------------------------------------
+  Samsung_S_Series                42,429        41.4   12366
+
+MAE by graphics_setting:
+  Group                         MAE (KB)    MAE (MB)    Rows
+  ----------------------------------------------------------
+  high                            43,631        42.6    3082
+  low                             38,592        37.7    3482
+  medium                          39,987        39.0    2538
+  ultra                           47,286        46.2    3264
+
+Baseline comparison:
+                                MAE (KB)     RMSE (KB)
+  Naive mean baseline            134,075       167,195
+  XGBoost model                   42,429        52,563
+  Improvement                      68.4%         68.6%
+
+SHAP Explainability
+==================================================
+
+SHAP Feature Importance (top 15):
+  Rank  Feature                         Mean |SHAP|
+  --------------------------------------------------
+  1     memory_utilization_pct             61,072.4  ████████████████████
+  2     graphics_encoded                   57,540.5  ██████████████████
+  3     thermal_memory_interaction         24,488.9  ████████
+  4     swap_utilization_pct               23,988.6  ███████
+  5     swapfree_kb                        16,251.8  █████
+  6     apk_size_mb                        15,114.3  ████
+  7     dha_total_kb                       13,320.9  ████
+  8     aptemp                              9,457.5  ███
+  9     game_pressure_encoded               7,364.6  ██
+  10    swap_used_kb                        6,723.4  ██
+  11    memory_pressure_score               5,307.1  █
+  12    ram_headroom_kb                     3,267.4  █
+  13    dha_empty_kb                        3,008.2
+  14    cpu_memory_stress                   2,910.9
+  15    dha_cache_kb                        2,191.8
+
+🔬 Research Findings:
+
+  Finding 1 — Dominant signal:
+  'memory_utilization_pct' is the strongest predictor
+  of memory reclaim magnitude.
+
+  Finding 2 — Pressure vs utilization:
+  memory_pressure_score rank : #11
+  memory_utilization_pct rank: #1
+
+  Finding 3 — Thermal influence:
+  thermal_memory_interaction rank: #3
+  → Thermal state significantly influences
+    reclaim magnitude — hot device under
+    memory pressure reclaims more aggressively.
+
+============================================================
+  FINAL SUMMARY
+============================================================
+
+  Dataset rows   : 60,000
+  Features used  : 34
+  Train sessions : 868
+  Test  sessions : 218
+
+  MAE            :     42,429 KB
+                   (41.4 MB)
+  RMSE           :     52,563 KB
+                   (51.3 MB)
+  Median Error   :     36,493 KB
+                   (35.6 MB)
+
+  Baseline MAE   :    134,075 KB
+  Improvement    : 68.4%
+
+  Top SHAP feature: memory_utilization_pct
+
+PIPELINE COMPLETE

@@ -1,0 +1,38 @@
+{
+  "memory_used_kb": [
+    1372803.625,
+    8896804.625
+  ],
+  "memory_utilization_pct": [
+    12.3076,
+    112.8206
+  ],
+  "swap_used_kb": [
+    -2875413.75,
+    4792356.25
+  ],
+  "swap_utilization_pct": [
+    -75.3848,
+    125.6413
+  ],
+  "heap_utilization_pct": [
+    52.3611,
+    102.5457
+  ],
+  "heap_free_ratio": [
+    -0.0255,
+    0.4764
+  ],
+  "dha_total_kb": [
+    -1525463.5,
+    3875662.5
+  ],
+  "dha_cache_ratio": [
+    0.3171,
+    0.9643
+  ],
+  "memory_pressure_score": [
+    -22.7693,
+    117.9489
+  ]
+}

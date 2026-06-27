@@ -1,0 +1,391 @@
+Memory Reclaim Prediction for Mobile Gaming — Complete Project Explanation
+
+---
+
+What Problem Are We Solving
+
+When you play a heavy mobile game like BGMI or CODM for 20-30 minutes, the game competes with everything else running in the background — music apps, messaging apps, browser tabs, system services. The operating system has to keep all of these alive while giving the game maximum memory to run smoothly.
+
+At some point the system runs out of breathing room. The memory manager — a kernel component called LMKD (Low Memory Killer Daemon) — steps in and reclaims memory by killing or trimming background processes. This reclaim event is what keeps the game alive and running.
+
+The problem is nobody knows in advance how much memory will be reclaimed. Sometimes it reclaims 50MB. Sometimes 800MB. This unpredictability creates two real problems:
+
+```
+Too little reclaim:
+  Game does not get enough free memory
+  Textures start dropping from GPU memory
+  Frame rate falls below acceptable threshold
+  User experiences stutter, freezes, and lag
+
+Too much reclaim:
+  System kills more background apps than necessary
+  User switches back to WhatsApp after gaming
+  App has to reload completely from scratch
+  User opens browser — all tabs are gone
+  Extra battery consumed reloading killed processes
+```
+
+If you could predict how much memory will be reclaimed before it happens, the system could pre-free exactly the right amount proactively — keeping the game smooth without unnecessarily killing background apps the user actually cares about.
+
+---
+
+Why This Problem Matters
+
+Gaming is one of the top three use cases on modern Android devices alongside camera and productivity. Memory management during gaming directly affects three things users care about deeply — frame rate stability during gameplay, the experience of switching between apps mid-game, and how quickly battery drains. Getting reclaim prediction right means better game performance with less collateral damage to other running applications.
+
+Every Android device manufacturer deals with this problem. The kernel's LMKD uses fixed thresholds and simple heuristics to decide when and how much to reclaim. It has no understanding of which game is running, what graphics quality is selected, how long the session has been active, or how hot the processor is. It reacts blindly to memory levels crossing predefined limits.
+
+An ML model that understands all of these signals together can predict reclaim magnitude far more accurately than any fixed threshold approach.
+
+---
+
+How We Collected the Data
+
+We used ADB (Android Debug Bridge) — a standard Android developer tool — to pull device telemetry directly from real mobile hardware during active gaming sessions. ADB reads kernel-level files that the operating system writes in real time. No special root access is needed. No modification to the device is required.
+
+We collected across four device series covering three RAM configurations — 6GB, 8GB, and 12GB devices. We played 12 different games ranging from ultra-high-memory AAA titles like BGMI, CODM, and eFootball down to casual low-memory games like Candy Crush, Angry Bird, and Hill Climb Racing. Each session ran for 10 to 45 minutes of real gameplay.
+
+The files we read from the device:
+```
+/proc/meminfo         → total memory, swap state, cached memory
+DMA buffer stats      → GPU shared memory usage
+Java heap metrics     → runtime memory allocation state
+/sys/class/thermal/   → application processor temperature
+/proc/stat            → CPU utilization
+App package info      → APK size, compilation state, odex status
+```
+
+Beyond standard memory counters, we captured game context information that most memory studies never include — graphics settings selected by the user, how the app was compiled at install time, whether bytecode is pre-optimized, screen resolution, refresh rate, and whether the session was online or offline. This context makes the dataset uniquely rich.
+
+Total dataset: 60,000 rows across 1,086 sessions.
+Each row is one memory snapshot during an active gaming session.
+
+---
+
+The Research Question
+
+```
+"Given the current device memory state, game context,
+ and hardware configuration at a snapshot moment during
+ active gaming, can we accurately predict how many KB
+ of memory will be reclaimed by the kernel — and which
+ signals drive reclaim magnitude most strongly across
+ different game types and device RAM configurations?"
+```
+
+This is interesting for three reasons. First, reclaim magnitude depends on memory state, thermal state, game type, graphics quality, and device RAM all simultaneously — no single signal explains it. Second, the relationship between these signals and reclaim magnitude is highly non-linear. High graphics on a 6GB device under thermal stress behaves completely differently from high graphics on a 12GB device at ambient temperature. Third, the finding of which signal matters most has direct engineering implications for how LMKD should be tuned per game category.
+
+---
+
+What Each Column in the Dataset Means
+
+This is where the project is genuinely unique. Most memory studies only capture raw memory counters. We captured the complete picture.
+
+Game and Device Context
+
+game:
+Which title is being played. We covered 12 games spanning a wide memory footprint range — BGMI and CODM at the high end consuming 2.5GB+, Candy Crush and Angry Bird at the low end consuming under 300MB. This diversity is intentional — the model must learn patterns that generalize across game types, not just memorize one game's behavior.
+
+game_category:
+Action, sports, casual, or strategy. Games within the same category share memory access patterns. Action games have rapid texture streaming and frequent GPU buffer swaps. Casual games have static memory footprints with occasional GC events. Strategy games have large persistent state with moderate streaming. Encoding category gives the model a higher-level signal beyond just game name.
+
+graphics_setting:
+Low, medium, high, or ultra. This turned out to be the second most important feature in the entire project. Higher graphics settings push more data into GPU memory, increase DMA buffer usage, and generate more memory pressure per frame. A game at ultra settings on a 6GB device creates fundamentally different memory conditions than the same game at low settings. No existing memory reclaim study includes this signal.
+
+compilation_filter:
+How the app was compiled at install time — speed, everything, verify, quicken, or speed-profile. This affects how efficiently the app uses memory at runtime. An app compiled with "everything" has more pre-compiled native code and lower memory overhead at runtime. An app compiled with "verify" runs more interpreted code and uses more heap memory. This signal captures the app's runtime memory efficiency class.
+
+odex_vdex:
+Whether the app's bytecode is pre-compiled into native format. odex+vdex means fully pre-compiled — fastest execution, lowest memory overhead. none means fully interpreted — highest memory overhead. This directly affects how much heap memory the app consumes during gameplay.
+
+resolution and refreshrate:
+Higher resolution means more framebuffer memory. Higher refresh rate means more frequent GPU buffer swaps. A game running at 1440×3088 at 120Hz uses significantly more GPU memory than the same game at 720×1560 at 60Hz. These signals capture the rendering workload intensity.
+
+multiuser and online_offline:
+Multiplayer online games maintain network buffers, game state synchronization structures, and voice chat buffers that offline single-player games do not. Online multiplayer sessions have consistently higher memory overhead than offline sessions of the same game.
+
+apk_size_mb:
+Larger games have more assets to stream into memory during gameplay. A 2100MB game like eFootball has far more texture variety to load than a 85MB game like Candy Crush. APK size is a proxy for asset complexity and streaming pressure.
+
+duration_sec:
+How long the session ran. Longer sessions accumulate more memory fragmentation, more GC cycles, and more background process accumulation. Memory pressure typically increases over the course of a long session.
+
+Raw Memory Signals
+
+memtotal_kb:
+Total physical RAM on the device. 6GB = 6,291,456 KB. 8GB = 8,388,608 KB. 12GB = 12,582,912 KB. This is a device constant that normalizes other features.
+
+swaptotal_kb and swapfree_kb:
+Swap is disk space used as overflow memory when physical RAM is full. When swapfree_kb starts dropping significantly the system is under extreme memory pressure — physical RAM is exhausted and the kernel is using slower flash storage. High swap usage almost always precedes large reclaim events.
+
+dma_buf_kb:
+Direct Memory Access buffer — memory shared between the CPU and GPU. When a game renders a frame the GPU reads textures from DMA buffers. High DMA buffer usage means the GPU is actively consuming significant memory that is not available to other processes. Games with high graphics settings have proportionally higher DMA buffer usage.
+
+heapsize_kb, heapmaxfree_kb, heapminfree_kb:
+Java heap metrics that capture runtime memory state. heapsize_kb is the total heap allocated to the app. heapmaxfree_kb is the largest contiguous free chunk in the heap — a small value means the heap is fragmented even if total free space exists. heapminfree_kb is the threshold below which the garbage collector fires. Together these three metrics tell you exactly how stressed the Java runtime is.
+
+dha_empty_kb and dha_cache_kb:
+Device Heap Allocator metrics. dha_cache_kb is cached memory that can be reclaimed quickly if needed. High dha_cache_kb relative to dha_total_kb means the system has a meaningful pool of reclaimable cached memory available — reclaim events will be more effective.
+
+currentcpuload:
+CPU utilization at the snapshot moment. High CPU load combined with high memory pressure creates the worst conditions for smooth gameplay — both compute and memory resources are saturated simultaneously.
+
+aptemp:
+Application processor temperature in Celsius. As the device heats up the thermal management system starts making decisions that interact with memory management. A hot device under memory pressure behaves differently from a cool device under the same memory pressure. This interaction ended up as the third most important SHAP feature.
+
+Target
+
+reclaimed_kb:
+How much memory in KB was reclaimed by the kernel at this snapshot. This is what we predict. Values ranged from 30,000 KB (29 MB) to 936,803 KB (915 MB) in the dataset with a mean of around 346 MB.
+
+---
+
+Why Single-Stage Regression and Not Two Models
+
+Some ML projects on similar problems use a two-stage approach — first classify whether a significant reclaim will happen, then regress on the magnitude. We deliberately chose a single-stage regression for this project.
+
+The reason is straightforward. During active gaming reclaim always happens — it is not a question of whether but of how much. Every gaming session long enough to generate a snapshot will have reclaim events. The interesting and actionable question is purely about magnitude. How much memory will be freed? That is a continuous value prediction — a regression problem from the start.
+
+Adding a classifier first would introduce unnecessary complexity without adding information. The classifier would essentially always predict yes during gaming sessions, making it useless as a gate. Single-stage regression is the architecturally correct choice for this problem framing.
+
+---
+
+Why XGBoost
+
+We had multiple options — Linear Regression, Random Forest, LightGBM, XGBoost, or neural networks. Here is the reasoning for choosing XGBoost.
+
+**Linear Regression fails here** because the relationship between memory signals and reclaim magnitude is fundamentally non-linear. A device at 85% memory utilization does not reclaim proportionally more than a device at 70% — it reclaims exponentially more as pressure approaches physical limits. No linear model captures this.
+
+**Random Forest would work** but XGBoost is consistently stronger on regression tasks with this kind of tabular sensor data. XGBoost's gradient boosting builds each tree to correct the errors of all previous trees, making it particularly good at learning complex interactions between features like the interplay between graphics settings, device RAM, and memory utilization.
+
+**LightGBM is faster** but XGBoost's default regularization parameters (reg_lambda=1.0) are better tuned for regression tasks where preventing overfitting on the continuous target is more nuanced. For a dataset of 60,000 rows with 34 features, training speed is not a bottleneck so we optimize for regression accuracy over training speed.
+
+**Neural networks were not considered** because they require significantly more data and hyperparameter tuning to outperform tree-based models on tabular sensor data. The interpretability of XGBoost plus SHAP is also a significant advantage over black-box neural networks when the goal includes explainability and research findings.
+
+---
+
+Why No Rolling Window Features
+
+Thermal prediction used rolling features heavily — 30-second and 60-second temperature trends. Memory reclaim prediction does not need them. Here is why.
+
+In thermal prediction the pattern of change over time is the signal. Temperature rising at 1.5°C per second is more dangerous than temperature sitting at 70°C. The trajectory matters more than the current value.
+
+In memory reclaim prediction the current snapshot state is the signal. The kernel's LMKD makes reclaim decisions based on current memory levels crossing thresholds. The amount it reclaims depends on how much memory is needed right now, not on how memory changed over the last 30 seconds. The current utilization, swap state, heap condition, and game context fully characterize the reclaim magnitude without needing temporal history.
+
+This is also why each row in the dataset is relatively independent. The reclaim amount at 10:00:00 is not strongly dependent on the reclaim amount at 09:59:30. Contrast this with temperature which is physically continuous — you cannot jump from 60°C to 75°C in one 5-second step.
+
+---
+
+Train/Test Split — Why Session-Based
+
+We split by sessions, not by rows. All rows from a session go entirely into training or entirely into test — never split between them.
+
+Why? Within a session rows are from the same device running the same game in the same conditions. If you put row 50 of a session in training and row 48 in test, the model trains on data from after the test point. That is temporal leakage and it makes validation accuracy artificially high. In real deployment you would never have future data when making a prediction.
+
+By splitting entire sessions you simulate real deployment — the model has never seen any data from the test device sessions. First 80% of sessions (868 sessions, 47,634 rows) go to training. Last 20% (218 sessions, 12,366 rows) go to test. Zero session overlap confirmed programmatically.
+
+---
+
+Scaling — Why and How
+
+XGBoost is a tree-based model and technically does not need feature scaling for prediction accuracy. Trees split on feature values and the scale of those values does not affect where optimal splits are found.
+
+We scale anyway for one important reason — SHAP value comparability. When features are on completely different scales (memtotal_kb in millions vs dha_cache_ratio between 0 and 1), SHAP values are hard to compare directly. Scaling brings all features to zero mean and unit variance so SHAP magnitudes are directly comparable across features, making the feature importance analysis honest and interpretable.
+
+The scaler is fitted on training data only. The same fitted scaler is applied to test data. Test data statistics never influence the scaling parameters.
+
+---
+
+Cross Validation — Why TimeSeriesSplit
+
+Standard k-fold cross-validation randomly shuffles data before splitting into folds. For session data this is wrong. If fold 3 training contains rows from session_042 and fold 3 validation also contains rows from session_042, the model validates on data from the same session it trained on. That inflates validation scores.
+
+TimeSeriesSplit keeps validation data chronologically after training data within each fold. Fold 1 trains on the first 20% of rows and validates on the next 20%. Fold 2 trains on the first 40% and validates on the next 20%. Each validation window is always temporally after the training window. This is the correct approach for any data that has a natural time ordering.
+
+Results across 5 folds:
+```
+Fold 1: MAE = 42,255 KB
+Fold 2: MAE = 36,679 KB
+Fold 3: MAE = 35,005 KB
+Fold 4: MAE = 34,100 KB
+Fold 5: MAE = 38,547 KB
+Mean  : 37,317 KB ± 2,898 KB
+```
+
+Variance across folds is relatively low (std = 2,898 KB vs mean = 37,317 KB) which indicates the model is stable and not highly sensitive to which sessions end up in validation.
+
+---
+
+Model Results — What the Numbers Mean
+
+### Global Metrics
+
+```
+MAE    : 42,429 KB  (41.4 MB)
+RMSE   : 52,563 KB  (51.3 MB)
+Median : 36,493 KB  (35.6 MB)
+```
+
+MAE of 41MB means on average the model's prediction is off by 41MB from the actual reclaim amount. Given that reclaim ranges from 29MB to 915MB across the dataset, a 41MB average error represents about 4.5% of the full range. That is strong accuracy.
+
+The gap between MAE (41MB) and Median Error (35MB) is small, which means the error distribution is relatively symmetric without extreme outliers pulling the mean up. This is healthier than a situation where median is very low and mean is very high (which would indicate a few catastrophically wrong predictions).
+
+Within tolerance breakdown:
+```
+Within ±50MB  : 66.3%
+Within ±100MB : 95.2%
+Within ±150MB : 99.8%
+Within ±200MB : 100.0%
+```
+
+The most operationally important number is 95.2% within ±100MB. For practical use by a memory management system, being within 100MB is sufficient to make the right pre-freeing decision. If the system needs to free approximately 400MB and our model predicts 380MB or 420MB, it makes the same pre-freeing decision either way. 95.2% accuracy at this tolerance level means the system would make the right decision in 19 out of every 20 reclaim events.
+
+Baseline Comparison
+
+```
+Naive mean baseline MAE : 134,075 KB (131 MB)
+XGBoost model MAE       :  42,429 KB  (41 MB)
+Improvement             :      68.4%
+```
+
+The naive baseline simply predicts the training set mean (around 346 MB) for every single row regardless of game, device, or memory state. Our model outperforms this by 68.4%. This is a strong result and the most important number for the resume because it proves ML adds massive real value over the simplest possible approach.
+
+---
+
+Per-Game Analysis — The Research Story
+
+```
+Easiest to predict:
+  HillClimbRacing  MAE = 38,913 KB (38 MB)
+  CandyCrush       MAE = 39,245 KB (38 MB)
+  LudoKing         MAE = 39,383 KB (39 MB)
+
+Hardest to predict:
+  CODM             MAE = 49,018 KB (48 MB)
+  FreeFire         MAE = 47,157 KB (46 MB)
+  eFootball        MAE = 44,091 KB (43 MB)
+```
+
+This pattern is not random. Low-memory casual games (HillClimbRacing, CandyCrush) have stable and predictable memory footprints. Their reclaim events are driven by simple memory level thresholds and follow consistent patterns. High-memory action games (CODM, FreeFire) have dynamic memory behavior — rapid texture streaming, variable network buffer sizes, frequent GPU buffer swaps — that creates more volatile reclaim patterns that are harder to predict precisely.
+
+This is a research finding:
+> "Reclaim magnitude is more predictable for low-memory casual games than for high-memory action titles, suggesting that memory volatility from dynamic asset streaming in AAA mobile games introduces prediction uncertainty that static memory footprint games do not exhibit."
+
+---
+
+Per-Graphics Analysis — Another Research Finding
+
+```
+Low graphics    MAE = 38,592 KB (38 MB)  ← best
+Medium graphics MAE = 39,987 KB (39 MB)
+High graphics   MAE = 43,631 KB (43 MB)
+Ultra graphics  MAE = 47,286 KB (46 MB)  ← worst
+```
+
+Performance degrades consistently as graphics quality increases. Ultra settings push devices into non-linear memory behavior — DMA buffers expand and contract rapidly, GPU memory pressure creates backpressure on system memory, and the interaction between thermal state and memory management becomes more complex. This non-linearity is harder for the model to capture precisely.
+
+Research finding:
+> "Prediction error increases monotonically with graphics quality setting, suggesting that ultra graphics settings introduce non-linear memory pressure dynamics that are less predictable than the near-linear behavior observed at lower graphics settings."
+
+---
+
+## SHAP Explainability — Why Each Prediction Was Made
+
+SHAP (SHapley Additive exPlanations) tells you how much each feature contributed to each individual prediction. For every prediction it gives every feature a positive or negative contribution score. Features that pushed the prediction higher have positive SHAP. Features that pushed it lower have negative SHAP.
+
+**Top 5 features by mean absolute SHAP:**
+```
+1. memory_utilization_pct        61,072  ← dominant
+2. graphics_encoded              57,540  ← surprising finding
+3. thermal_memory_interaction    24,489
+4. swap_utilization_pct          23,989
+5. swapfree_kb                   16,252
+```
+
+### Finding 1 — Memory Utilization Dominates
+
+memory_utilization_pct is the strongest predictor with a mean SHAP of 61,072 KB. This is the normalized ratio of used memory to total RAM — not raw bytes but percentage.
+
+The insight here is that the normalized ratio beats raw byte values completely. swapfree_kb (raw bytes) only ranks fifth with SHAP of 16,252. The model learned that how full memory is relative to the device's total RAM matters more than absolute bytes. A device with 5GB used out of 6GB (83%) is in a fundamentally different pressure state than a device with 5GB used out of 12GB (42%), even though both have the same raw bytes used.
+
+**Research finding:**
+> "Memory utilization as a normalized percentage of device RAM is the dominant predictor of reclaim magnitude, outperforming all raw byte metrics — establishing that relative memory pressure rather than absolute consumption drives kernel reclaim decisions."
+
+### Finding 2 — Graphics Setting is Second Most Important
+
+graphics_encoded ranks second with a mean SHAP of 57,540 KB. This is nearly as influential as memory utilization itself. This is the most surprising finding in the project.
+
+Graphics quality outranks game identity (game_pressure_encoded is only ninth), device RAM, CPU load, and even raw swap state. A game at ultra graphics creates more memory pressure than a different game at low graphics regardless of which game it is. The rendering workload quality setting is a stronger signal of memory stress than the game title.
+
+**Research finding:**
+> "Graphics quality setting is the second strongest predictor of memory reclaim magnitude, outranking game identity, device RAM, and CPU load — suggesting that rendering workload intensity is a more fundamental driver of memory pressure than application-specific behavior."
+
+### Finding 3 — Thermal and Memory Interact
+
+thermal_memory_interaction — the product of AP temperature and memory utilization percentage — ranks third with SHAP of 24,489 KB. This is an engineered feature that captures the interaction between two subsystems. Neither temperature alone nor memory alone tells the full story. A hot device under memory pressure reclaims more aggressively than a cool device under the same memory pressure.
+
+This finding makes physical sense. A hot processor runs less efficiently, thermal throttling may be reducing CPU performance, and the system attempts to compensate by freeing more memory to reduce overall workload. The interaction term captures this joint effect that neither raw signal captures individually.
+
+**Research finding:**
+> "The interaction between thermal state and memory pressure is the third strongest predictor, ranking above either signal alone — confirming that multi-signal stress modeling captures reclaim behavior that single-metric approaches miss entirely."
+
+---
+
+## Why These Three Findings Are Valuable
+
+Each finding has a direct engineering implication:
+
+```
+Finding 1 (utilization % beats raw bytes):
+  LMKD should use normalized utilization thresholds
+  per device RAM class, not fixed byte thresholds.
+  A 500MB threshold makes sense on 6GB but not on 12GB.
+
+Finding 2 (graphics > game identity):
+  Game Booster should adjust memory reservation
+  based on current graphics settings, not just
+  which game is running. Same game at ultra needs
+  more aggressive pre-freeing than at low.
+
+Finding 3 (thermal × memory interaction):
+  Thermal management and memory management should
+  be coordinated, not independent. When AP temp
+  crosses 65°C and memory is above 75%, the system
+  should pre-free more aggressively than either
+  threshold would trigger independently.
+```
+
+---
+
+## What the Project Demonstrates
+
+**Technical depth:**
+You worked with kernel-level memory management concepts — LMKD, DMA buffers, Java heap, odex/vdex compilation — and translated them into ML features. This is rare. Most ML engineers would not know what heapmaxfree_kb means or why it predicts reclaim better than heapsize_kb.
+
+**Feature engineering creativity:**
+You included signals nobody else includes in a memory study — graphics settings, compilation filter, odex state. The second most important feature in the entire project (graphics_encoded) came from thinking beyond standard memory counters.
+
+**Honest evaluation:**
+Baseline comparison showing 68.4% improvement proves the model adds value. Per-game and per-graphics breakdowns show you understand where the model works and where it struggles. These are signs of a mature ML practitioner.
+
+**Research contributions:**
+Three clear SHAP-identified findings with direct engineering implications. Not just "the model works" but "here is specifically what drives the phenomenon and what to do about it."
+
+---
+
+
+
+One Hard Question
+
+The hardest question you will get is:
+
+> "Graphics setting is your second most important feature. But the user controls graphics settings. How does a system-level component know what graphics setting is currently active?"
+
+The answer is:
+
+> "The graphics quality setting is accessible at runtime through the Android GameManager API introduced in Android 12. The GPU rendering quality tier is also readable from the game's configuration files in the app data directory. Additionally, DMA buffer size and GPU utilization indirectly encode the active graphics quality even without reading the setting directly — a model trained on explicit graphics labels could be deployed using DMA buffer and GPU utilization as proxies in production environments where direct settings access is restricted."
+
+That answer shows you thought about deployment, not just model training.
+
+---
+
